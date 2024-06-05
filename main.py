@@ -43,7 +43,7 @@ def main():
     col1, spacer, col2 = st.columns([9, 1, 12])
 
     # Upload file in the left column with a unique key
-    pdf = col1.file_uploader("Upload PDF Contract", type="pdf", key="unique_pdf_upload_key")
+    pdf = col1.file_uploader("Upload PDF Paper", type="pdf", key="unique_pdf_upload_key")
 
     if pdf is not None:
         # Convert the PDF bytes to a base64 encoded string and display in iframe
@@ -53,66 +53,76 @@ def main():
             unsafe_allow_html=True,
         )
 
-        with st.spinner("Loading PDF..."):
-            pdf_reader = PdfReader(pdf)
-            col1.write(pdf_reader)
+        if 'summary' not in st.session_state:
+            with st.spinner("Loading PDF..."):
+                pdf_reader = PdfReader(pdf)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text()
 
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
+            with st.spinner("Processing text..."):
+                # Split docs into fragments
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1000, chunk_overlap=200, length_function=len
+                )
+                chunks = text_splitter.split_text(text=text)
 
-        with st.spinner("Processing text..."):
-            # Split docs into fragments
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000, chunk_overlap=200, length_function=len
-            )
-            chunks = text_splitter.split_text(text=text)
+                # Embeddings
+                store_name = pdf.name[:-4]
 
-            # Embeddings
-            store_name = pdf.name[:-4]
+                if os.path.exists(f"{store_name}.pkl"):
+                    with open(f"{store_name}.pkl", "rb") as f:
+                        VectorStore = pickle.load(f)
+                    col1.write("Embeddings Loaded from the Disk")
+                else:
+                    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+                    VectorStore = FAISS.from_texts(chunks, embedding=embeddings)
+                    with open(f"{store_name}.pkl", "wb") as f:
+                        pickle.dump(VectorStore, f)
 
-            if os.path.exists(f"{store_name}.pkl"):
-                with open(f"{store_name}.pkl", "rb") as f:
-                    VectorStore = pickle.load(f)
-                col1.write("Embeddings Loaded from the Disk")
-            else:
-                embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-                VectorStore = FAISS.from_texts(chunks, embedding=embeddings)
-                with open(f"{store_name}.pkl", "wb") as f:
-                    pickle.dump(VectorStore, f)
+                # Embed the default prompt for a summary
+                default_prompt = (
+                    "Summarize the scientific paper by providing the main objectives, background, problem statement, purpose, methodology, "
+                    "key findings, data presentation, statistical significance, interpretation of results, implications, limitations, future research directions, "
+                    "main takeaways, recommendations, key figures and tables, previous research, research gap, broader impact, and significance, "
+                    "all in one concise paragraph. "
+                    "Highlight any unclear or vague language, methodological limitations, key results, data interpretation, study implications, key conclusions, "
+                    "important figures, table contents, key studies, research gaps, implications, significance, and impact with short bullet points. "
+                    "Keep the summary and concerns very brief."
+                    "Make sure to keep this brief, about 4-5 sentences."
+                )
 
-        # Embed the default prompt for a summary
-        default_prompt = (
-            "Summarize the scientific paper by providing the main objectives, background, problem statement, purpose, methodology, "
-            "key findings, data presentation, statistical significance, interpretation of results, implications, limitations, future research directions, "
-            "main takeaways, recommendations, key figures and tables, previous research, research gap, broader impact, and significance, "
-            "all in one concise paragraph. "
-            "Highlight any unclear or vague language, methodological limitations, key results, data interpretation, study implications, key conclusions, "
-            "important figures, table contents, key studies, research gaps, implications, significance, and impact with short bullet points. "
-            "Keep the summary and concerns very brief."
-            "Make sure to keep this brief, about 4-5 sentences."
-        )
+                docs = VectorStore.similarity_search(query=default_prompt, k=3)
+                llm = ChatOpenAI(model_name="gpt-3.5-turbo", openai_api_key=openai_api_key)
+                chain = load_qa_chain(llm=llm, chain_type="stuff")
+                with get_openai_callback() as cb:
+                    summary = chain.run(input_documents=docs, question=default_prompt)
+                col1.write(f"Summary: {summary}")
 
+                # Store the summary and vector store in session state
+                st.session_state['summary'] = summary
+                st.session_state['vector_store'] = VectorStore
+        else:
+            # Display the stored summary
+            col1.write(f"Summary: {st.session_state['summary']}")
 
-        docs = VectorStore.similarity_search(query=default_prompt, k=3)
-        llm = ChatOpenAI(model_name="gpt-3.5-turbo", openai_api_key=openai_api_key)
-        chain = load_qa_chain(llm=llm, chain_type="stuff")
-        with get_openai_callback() as cb:
-            response = chain.run(input_documents=docs, question=default_prompt)
-        col1.write(f"Summary: {response}")
+            VectorStore = st.session_state['vector_store']
 
-        # UI for additional user questions with a unique key
+    # UI for additional user questions with a unique key
+    if 'vector_store' in st.session_state:
         query = col1.text_input("Ask any questions you have about the paper", key="unique_query_input_key")
 
         if query:
             with st.spinner("Generating response..."):
                 docs = VectorStore.similarity_search(query=query, k=3)
-                response = chain.run(input_documents=docs, question=query)
+                llm = ChatOpenAI(model_name="gpt-3.5-turbo", openai_api_key=openai_api_key)
+                chain = load_qa_chain(llm=llm, chain_type="stuff")
+                with get_openai_callback() as cb:
+                    response = chain.run(input_documents=docs, question=query)
                 col1.markdown(f"**Response:** {response}")
-
     else:
         # If no PDF is loaded, show a message in the right column
-        col2.write("Contract Not Loaded")
+        col2.write("Paper Not Loaded")
 
 if __name__ == "__main__":
     if openai_api_key and openai_api_key.startswith("sk-"):
